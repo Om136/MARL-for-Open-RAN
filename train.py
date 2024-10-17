@@ -1,12 +1,13 @@
+# train.py
+
+
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import DummyVecEnv
 from env import RANSlicingEnv
 
 # Main script to train and evaluate Multi-Agent PPO for RAN slicing
-# Main script to train and evaluate Multi-Agent PPO for RAN slicing
-# Main script to train and evaluate Multi-Agent PPO for RAN slicing
-# Main script to train and evaluate Multi-Agent PPO for RAN slicing
-if __name__ == "__main__":
+
+if _name_ == "_main_":
 
     # Create the RAN Slicing environment with the number of slices (agents)
     env = DummyVecEnv([lambda: RANSlicingEnv(num_slices=3)])
@@ -40,7 +41,7 @@ if __name__ == "__main__":
 
     # Evaluate the trained model
     obs = env.reset()  # DummyVecEnv.reset() returns only the observation
-    for step in range(100):
+    for step in range(10):
         # Get action from the trained model
         action, _states = model.predict(obs)
         

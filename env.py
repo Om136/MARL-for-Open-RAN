@@ -1,3 +1,7 @@
+# env.py
+
+
+
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -5,8 +9,8 @@ import matplotlib.pyplot as plt
 import os
 
 class RANSlicingEnv(gym.Env):
-    def __init__(self, num_slices=3, max_bandwidth=100, max_power=100, render_mode=None):
-        super(RANSlicingEnv, self).__init__()
+    def _init_(self, num_slices=3, max_bandwidth=100, max_power=100, render_mode=None):
+        super(RANSlicingEnv, self)._init_()
 
         # Number of slices (agents)
         self.num_slices = num_slices
@@ -21,113 +25,128 @@ class RANSlicingEnv(gym.Env):
         self.max_bandwidth = max_bandwidth
         self.max_power = max_power
 
-        # Initialize the state of the environment
+        # Initialize state, steps, and previous allocations
         self.state = np.zeros((num_slices, 3))
-        self.total_steps = 0  # Track total steps for dynamic adjustments
+        self.total_steps = 0
 
-        # Lists to store bandwidth and power allocation values
+        # Store allocations for plotting
         self.bandwidth_allocs = []
         self.power_allocs = []
+        self.prev_bandwidth_alloc = np.zeros(num_slices)
+        self.prev_power_alloc = np.zeros(num_slices)
 
-        # Rendering mode
+        # Rendering mode and plot setup
         self.render_mode = render_mode
-        self.fig, self.ax = None, None  # For plotting
-
-        # Folder for saving the plots
+        self.fig, self.ax = None, None
         self.save_path = "ran_slicing_plots"
-        os.makedirs(self.save_path, exist_ok=True)  # Create folder if it doesn't exist
+        os.makedirs(self.save_path, exist_ok=True)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        
-        # Reset network conditions (latency, throughput, packet loss)
-        self.state = np.random.rand(self.num_slices, 3)
-        self.total_steps = 0  # Reset step count
 
-        # Clear stored allocations
+        # Reset state and counters
+        self.state = np.random.rand(self.num_slices, 3)
+        self.total_steps = 0
+
+        # Clear previous allocations
         self.bandwidth_allocs = []
         self.power_allocs = []
+        self.prev_bandwidth_alloc = np.zeros(self.num_slices)
+        self.prev_power_alloc = np.zeros(self.num_slices)
 
-        # Initialize plot for real-time rendering
+        # Initialize plot for rendering
         if self.render_mode == "human" and self.fig is None:
             self.fig, self.ax = plt.subplots()
-            plt.ion()  # Enable interactive mode for real-time plotting
+            plt.ion()
 
         return self.state, {}
 
     def step(self, action):
-        # Action: [bandwidth, power] for each slice
-        bandwidth_alloc = action[:, 0] * self.max_bandwidth
-        power_alloc = action[:, 1] * self.max_power
+        # Clip actions to avoid erratic changes
+        min_bandwidth = 0.01
+        min_power = 0.01
+        bandwidth_alloc = np.clip(action[:, 0], min_bandwidth, 1) * self.max_bandwidth
+        power_alloc = np.clip(action[:, 1], min_power, 1) * self.max_power
 
-        # Store allocations for plotting
+        # Smooth allocations to reduce fluctuations
+        bandwidth_alloc = 0.8 * self.prev_bandwidth_alloc + 0.2 * bandwidth_alloc
+        power_alloc = 0.8 * self.prev_power_alloc + 0.2 * power_alloc
+
+        # Store current allocations for the next step
         self.bandwidth_allocs.append(bandwidth_alloc)
         self.power_allocs.append(power_alloc)
+        self.prev_bandwidth_alloc = bandwidth_alloc
+        self.prev_power_alloc = power_alloc
 
-        reward = 0
-        penalty = 0
+        # SLA Targets
+        target_latency = 0.3
+        target_throughput = 0.7
+        max_packet_loss = 0.05
 
-        # Reward calculation based on SLA satisfaction and penalties
+        # Initialize rewards and penalties
+        rewards = np.zeros(self.num_slices)
+        penalties = np.zeros(self.num_slices)
+
         for i in range(self.num_slices):
-            latency = self.state[i, 0]
-            throughput = self.state[i, 1]
-            packet_loss = self.state[i, 2]
+            latency, throughput, packet_loss = self.state[i]
 
-            # Reward for maximizing throughput, minimizing latency and packet loss
-            slice_reward = (throughput * 10) - (latency * 5) - (packet_loss * 5)
-            reward += slice_reward
+            # QoS Satisfaction Scores
+            latency_score = np.exp(-3 * latency)  # Reward for lower latency
+            throughput_score = np.tanh(throughput / target_throughput)  # Reward saturates at 1
+            packet_loss_penalty = np.exp(3 * (packet_loss - max_packet_loss))  # Penalty for high packet loss
 
-            # Add penalties for exceeding bandwidth or power limits
-            if bandwidth_alloc[i] > self.max_bandwidth or power_alloc[i] > self.max_power:
-                penalty += 10  # Penalize for exceeding resource limits
+            # Reward based on QoS and resource efficiency
+            rewards[i] = (throughput_score * 15) + (latency_score * 10) - (packet_loss_penalty * 10)
 
-        reward -= penalty  # Subtract penalties from reward
+            # Resource usage penalties
+            resource_penalty = 0.05 * (bandwidth_alloc[i] / self.max_bandwidth + power_alloc[i] / self.max_power)
+            rewards[i] -= resource_penalty
 
-        # Update network conditions (dynamically simulating changing network loads)
+        # Fairness Penalty: Encourage balanced allocation
+        fairness_penalty = np.std(bandwidth_alloc) + np.std(power_alloc)
+        total_penalty = np.sum(penalties) + fairness_penalty
+
+        # Calculate total reward
+        total_reward = np.sum(rewards) - total_penalty
+
+        # Update state (random for now; in practice, it would depend on the environment dynamics)
         self.state = np.random.rand(self.num_slices, 3)
         self.total_steps += 1
 
-        # Done condition: for example, if the environment runs for 1000 steps
+        # Termination condition
         terminated = self.total_steps >= 1000
-        truncated = False  # You can define conditions for truncation if needed
+        truncated = False
 
-        return self.state, reward, terminated, truncated, {}
+        return self.state, total_reward, terminated, truncated, {}
 
     def render(self, mode=None):
         if self.render_mode == "human":
-            # Print the state for each step
             print(f"\nStep {self.total_steps} - State: {self.state}")
-            
-            # Print bandwidth and power allocations
-            bandwidth_alloc = self.bandwidth_allocs[-1]  # Get the most recent bandwidth allocation
-            power_alloc = self.power_allocs[-1]  # Get the most recent power allocation
+
+            # Get the latest allocations
+            bandwidth_alloc = self.bandwidth_allocs[-1]
+            power_alloc = self.power_allocs[-1]
             print(f"Bandwidth Allocation: {bandwidth_alloc}")
             print(f"Power Allocation: {power_alloc}")
 
-            # Update real-time plot for latency, throughput, and packet loss
-            self.ax.clear()  # Clear the previous plot
-            # self.ax.plot(self.state[:, 0], label="Latency", marker='o')
-            # self.ax.plot(self.state[:, 1], label="Throughput", marker='x')
-            # self.ax.plot(self.state[:, 2], label="Packet Loss", marker='s')
-
-            # Add bandwidth and power plots
+            # Update real-time plot
+            self.ax.clear()
             bandwidth_allocs = np.array(self.bandwidth_allocs)
             power_allocs = np.array(self.power_allocs)
+
             for i in range(self.num_slices):
                 self.ax.plot(bandwidth_allocs[:, i], label=f"Bandwidth Slice {i}", linestyle='--', marker='o')
                 self.ax.plot(power_allocs[:, i], label=f"Power Slice {i}", linestyle='--', marker='x')
 
-            self.ax.set_xlabel("Slice")
-            self.ax.set_ylabel("QoS Metrics and Allocations")
+            self.ax.set_xlabel("Step")
+            self.ax.set_ylabel("Resource Allocations")
             self.ax.legend()
-            self.ax.set_title(f"Step {self.total_steps} QoS Metrics and Resource Allocation Visualization")
-            
-            # Save the plot at each step
+            self.ax.set_title(f"Step {self.total_steps} Resource Allocation")
+
+            # Save plot for each step
             plt.savefig(os.path.join(self.save_path, f"step_{self.total_steps}.png"))
+            plt.pause(0.01)
 
-            plt.pause(0.01)  # Pause for real-time updating
-
-        # Optionally show the final plot at the end of the simulation
         if self.total_steps >= 1000 and self.render_mode == "human":
-            plt.ioff()  # Turn off interactive mode
-            plt.show()  # Show the final plot
+            plt.ioff()
+            plt.show()
